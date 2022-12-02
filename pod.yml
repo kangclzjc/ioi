@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testPod
+
+spec:
+  containers:
+    - name: testContainer
+      image: kangclzjc/fio
+      command: ["/bin/sh", "-ec", "while :; do echo '.'; sleep 5 ; done"]
+      resources:
+        limits:
+          cpu: "0.2"
+          memory: "100Mi"
+        requests:
+          cpu: "0.2"
+          memory: "100Mi"
