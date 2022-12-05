@@ -10,7 +10,7 @@ spec:
   containers:
     - name: %containerName%
       image: kangclzjc/fio
-      command: ["fio", "-filename=%filename% -iodepth %iodepth% -thread -rw=%rw% -ioengine=%ioengine% -bs=%bs% -size=%size% -rate=%rate% -numjobs=%numjobs% -runtime=%runtime% -time_based -groupd_reporting -name=%name%"]
+      command: ["fio", "-filename=%filename% -iodepth %iodepth% -thread -rw=%rw% -ioengine=%ioengine% -bs=%bs% -size=%size% -rate=%rRate%,%wRate% -numjobs=%numjobs% -runtime=%runtime% -time_based -groupd_reporting -name=%name%"]
       resources:
         limits:
           cpu: "0.2"

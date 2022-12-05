@@ -52,6 +52,32 @@ function rand(){
     echo $(($num%$max + $min))
 }
 
+function rwmod() {
+	randrw=$(rand 0 2)
+    if [ $randrw -eq 0 ]
+    then
+    	rw=randread
+    elif [ $randrw -eq 1 ]
+    then
+    	rw=randwrite
+    else
+    	rw=randrw
+    fi
+    echo $rw
+}
+
+function getRates() {
+	rates=(0 0)
+	if [ $1 == "randread" ]; then
+		rates[0]=$(rand minBw maxBw)
+	elif [ $1 == "randwrite" ]; then
+		rates[1]=$(rand minBw maxBw)
+	else
+		rates[0]=$(rand minBw maxBw)
+		rates[1]=$(rand minBw maxBw)
+	fi
+	echo ${rates[*]}
+}
 generateCore() {
   newYaml=$1.yml
   cp template.yml $newYaml
@@ -63,10 +89,11 @@ generateCore() {
   sed -i -e "s;%ioengine%;$6;g" $newYaml
   sed -i -e "s;%bs%;$7;g" $newYaml
   sed -i -e "s;%size%;$8;g" $newYaml
-  sed -i -e "s;%rate%;$9;g" $newYaml
-  sed -i -e "s;%numjobs%;${10};g" $newYaml
-  sed -i -e "s;%runtime%;${11};g" $newYaml
-  sed -i -e "s;%name%;${12};g" $newYaml
+  sed -i -e "s;%rRate%;$9;g" $newYaml
+  sed -i -e "s;%wRate%;${10};g" $newYaml
+  sed -i -e "s;%numjobs%;${11};g" $newYaml
+  sed -i -e "s;%runtime%;${12};g" $newYaml
+  sed -i -e "s;%name%;${13};g" $newYaml
 }
 
 generatePodSpecs() {
@@ -84,18 +111,20 @@ generatePodSpecs() {
     containerName=con-$i
     filename=/tmp/test
     iodepth=1
-    rw=randwrite
+
+    rw=`rwmod`
     ioengine=libaio
     bs=1k
     size=10g
-    rate=$(rand minBw maxBw)
-    echo $rate
-    total=$(($total - $rate))
+    rates=($(getRates $rw))
+    eval set $rates
+    echo $rates
+    total=$(($total - ${rates[0]}))
 
     numjobs=1
     runtime=604800
     name=test-$i
-    generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $size $rate $numjobs $runtime $name
+    generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $size ${rates[0]} ${rates[1]} $numjobs $runtime $name
   done
 
   echo "generate $podNum pod"
@@ -104,9 +133,10 @@ generatePodSpecs() {
   cp template.yml $newYaml
   containerName=con-$podNum
   name=test-$podNum
+  rw=`rwmod`
   echo $total
 
-  generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $size $total $numjobs $runtime $name
+  generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $size $total $total $numjobs $runtime $name
 }
 
 generatePodSpecs
