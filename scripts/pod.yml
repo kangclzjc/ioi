@@ -7,7 +7,7 @@ spec:
   containers:
     - name: testContainer
       image: kangclzjc/fio
-      command: ["fio", "-filename=/test/testfile", "while :; do echo '.'; sleep 5 ; done"]
+      command: ["fio", "-filename=/test/testfile -iodepth 1 -thread -rw=randwrite -ioengine=libaio -bs=16k -size=2G -rate=10M -numjobs=1 -runtime=604800 -time_based -groupd_reporting -name=test"]
       resources:
         limits:
           cpu: "0.2"
