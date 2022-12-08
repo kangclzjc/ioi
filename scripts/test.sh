@@ -8,6 +8,19 @@ ARGUMENT_LIST=(
 
 podNum=3
 
+declare -A coefficients
+coefficients["512"]=10
+coefficients["1k"]=8
+coefficients["4k"]=5
+coefficients["8k"]=3
+coefficients["16k"]=2
+coefficients["32k"]=1
+
+#default coefficient is 1
+coefficient=1
+BS=("512" "1k" "4k" "8k" "16k" "32k")
+
+
 getParams() {
   # read arguments
   opts=$(getopt \
@@ -66,6 +79,7 @@ function rwmod() {
     echo $rw
 }
 
+# random generate randread/randwrite bw
 function getRates() {
 	rates=(0 0)
 	if [ $1 == "randread" ]; then
@@ -78,6 +92,26 @@ function getRates() {
 	fi
 	echo ${rates[*]}
 }
+
+function randBs() {
+	i=$(rand 1 33)
+	if [ $i == 33 ]; then
+		echo 512
+	else
+		echo $i"k"
+	fi
+}
+
+function getCoefficient() {
+	num=${1%?}
+	for((i=1;i<${#BS[@]};i++)) do
+		if [ $num -lt ${BS[i]%?} ]; then
+			echo ${coefficients[${BS[`expr $i - 1`]}]}
+			break
+		fi
+	done
+}
+
 generateCore() {
   newYaml=$1.yml
   cp template.yml $newYaml
@@ -87,13 +121,14 @@ generateCore() {
   sed -i -e "s;%iodepth%;$4;g" $newYaml
   sed -i -e "s;%rw%;$5;g" $newYaml
   sed -i -e "s;%ioengine%;$6;g" $newYaml
-  sed -i -e "s;%bs%;$7;g" $newYaml
-  sed -i -e "s;%size%;$8;g" $newYaml
-  sed -i -e "s;%rRate%;$9;g" $newYaml
-  sed -i -e "s;%wRate%;${10};g" $newYaml
-  sed -i -e "s;%numjobs%;${11};g" $newYaml
-  sed -i -e "s;%runtime%;${12};g" $newYaml
-  sed -i -e "s;%name%;${13};g" $newYaml
+  sed -i -e "s;%rbs%;$7;g" $newYaml
+  sed -i -e "s;%wbs%;$8;g" $newYaml
+  sed -i -e "s;%size%;$9;g" $newYaml
+  sed -i -e "s;%rRate%;${10};g" $newYaml
+  sed -i -e "s;%wRate%;${11};g" $newYaml
+  sed -i -e "s;%numjobs%;${12};g" $newYaml
+  sed -i -e "s;%runtime%;${13};g" $newYaml
+  sed -i -e "s;%name%;${14};g" $newYaml
 }
 
 generatePodSpecs() {
@@ -114,17 +149,21 @@ generatePodSpecs() {
 
     rw=`rwmod`
     ioengine=libaio
-    bs=1k
+    rbs=($(randBs))
+	wbs=($(randBs))
+
     size=10g
     rates=($(getRates $rw))
+    coefficient=$(getCoefficient "31k")
     eval set $rates
     echo $rates
-    total=$(($total - ${rates[0]}))
-
+    echo $total ${rates[0]} $coefficient
+    total=$(($total - ${rates[0]} * coefficient))
+	echo $total
     numjobs=1
     runtime=604800
     name=test-$i
-    generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $size ${rates[0]} ${rates[1]} $numjobs $runtime $name
+    generateCore $podName $containerName $filename $iodepth $rw $ioengine $rbs $wbs $size ${rates[0]} ${rates[1]} $numjobs $runtime $name
   done
 
   echo "generate $podNum pod"
@@ -134,9 +173,10 @@ generatePodSpecs() {
   containerName=con-$podNum
   name=test-$podNum
   rw=`rwmod`
+  bs=($(randBs))
   echo $total
 
-  generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $size $total $total $numjobs $runtime $name
+  generateCore $podName $containerName $filename $iodepth $rw $ioengine $bs $bs $size $total $total $numjobs $runtime $name
 }
 
 generatePodSpecs
