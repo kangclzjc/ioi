@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %podName%
+  annotations:
+    blockio.resources.beta.kubernetes.io/container.stress: %prio%
+spec:
+  containers:
+    - name: %containerName%
+      image: kangclzjc/fio
+      command: ["fio", "-filename=%filename% -iodepth %iodepth% -thread -rw=%rw% -ioengine=%ioengine% -bs=%rbs%,%wbs% -size=%size% -rate=%rRate%m,%wRate%m -numjobs=%numjobs% -runtime=%runtime% -time_based -groupd_reporting -name=%name%"]
+      resources:
+        limits:
+          cpu: "0.2"
+          memory: "100Mi"
+        requests:
+          cpu: "0.2"
+          memory: "100Mi"

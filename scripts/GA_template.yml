@@ -3,14 +3,14 @@ kind: Pod
 metadata:
   name: %podName%
   annotations:
-    blockio.kubernetes.io/container.stress.rbps: "600M"
-    blockio.kubernetes.io/container.stress.wbps: "600M"
+    blockio.kubernetes.io/container.stress.rbps: %rbps%
+    blockio.kubernetes.io/container.stress.wbps: "%wbps%
     #blockio.resources.beta.kubernetes.io/container.stress: high-prio
 spec:
   containers:
     - name: %containerName%
       image: kangclzjc/fio
-      command: ["fio", "-filename=%filename% -iodepth %iodepth% -thread -rw=%rw% -ioengine=%ioengine% -bs=%rbs%,%wbs% -size=%size% -rate=%rRate%,%wRate% -numjobs=%numjobs% -runtime=%runtime% -time_based -groupd_reporting -name=%name%"]
+      command: ["fio", "-filename=%filename% -iodepth %iodepth% -thread -rw=%rw% -ioengine=%ioengine% -bs=%rbs%,%wbs% -size=%size% -rate=%rRate%m,%wRate%m -numjobs=%numjobs% -runtime=%runtime% -time_based -groupd_reporting -name=%name%"]
       resources:
         limits:
           cpu: "0.2"
