@@ -236,7 +236,7 @@ generateGAPodSpecs() {
   rw=`rwmod`
   rbs=($(randBs))
   wbs=($(randBs))
-  remain=$(($total + 10))
+  remain=$(($total))
   local rates
   rates=($(getFixedRates $rw $total))
   rcoefficient=$(getCoefficient $rbs)

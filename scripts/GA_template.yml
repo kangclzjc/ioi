@@ -4,7 +4,7 @@ metadata:
   name: %podName%
   annotations:
     blockio.kubernetes.io/container.stress.rbps: %rbps%
-    blockio.kubernetes.io/container.stress.wbps: "%wbps%
+    blockio.kubernetes.io/container.stress.wbps: %wbps%
     #blockio.resources.beta.kubernetes.io/container.stress: high-prio
 spec:
   containers:

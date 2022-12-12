@@ -1,0 +1,20 @@
+classes:
+  high-prio:
+  - Devices:
+    - name: "eth0"
+      ingress: "100M"
+      egress: "100M"
+    
+  normal:
+  - Devices:
+    - name: "eth0"
+      ingress: "100M"
+      egress: "100M"
+
+  low-prio:
+  - Devices:
+    - name: "eth0"
+      ingress: "100M"
+      egress: "100M"
+
+

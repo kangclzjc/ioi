@@ -20,11 +20,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
-	"strings"
-
 	"github.com/sirupsen/logrus"
+	utils "intel.com/ioi/pkg"
+	"os"
 	"sigs.k8s.io/yaml"
+	"strings"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -37,6 +37,7 @@ type config struct {
 	SetAnnotation string   `json:"setAnnotation"`
 	AddEnv        string   `json:"addEnv"`
 	SetEnv        string   `json:"setEnv"`
+	QosFile       string   `json:"qos"`
 }
 
 type plugin struct {
@@ -91,7 +92,35 @@ func (p *plugin) Shutdown() {
 func (p *plugin) RunPodSandbox(pod *api.PodSandbox) error {
 	log.Infof("---------%q------\n", pod.Linux.Netns)
 	for k, v := range pod.GetAnnotations() {
-		log.Infof("%s: %s", k, v)
+		log.Infof("----%s: -----%s", k, v)
+
+		//if k == "kubectl.kubernetes.io/last-applied-configuration" {
+		//	var vv interface{}
+		//	json.Unmarshal([]byte(v), &vv)
+		//	data := vv.(map[string]interface{})
+		//	for key, value := range data {
+		//		if key == "metadata" {
+		//			switch v := value.(type) {
+		//			case string:
+		//				fmt.Println(key, v, "(string)")
+		//			case float64:
+		//				fmt.Println(key, v, "(float64)")
+		//			case []interface{}:
+		//				fmt.Println(key, "(array):")
+		//				for i, u := range v {
+		//					fmt.Println("--------------    ", i, u)
+		//				}
+		//			default:
+		//				fmt.Println(k, v, "(unknown)")
+		//			}
+		//		}
+		//	}
+		//}
+	}
+	if value, ok := pod.Annotations["netio.resources.kubernetes.io/class"]; ok {
+		fmt.Printf(value)
+	} else {
+		fmt.Println("key1 不存在")
 	}
 	return nil
 }
@@ -212,6 +241,7 @@ func main() {
 	flag.StringVar(&cfg.SetAnnotation, "set-annotation", "", "set this annotation on containers")
 	flag.StringVar(&cfg.AddEnv, "add-env", "", "add this environment variable for containers")
 	flag.StringVar(&cfg.SetEnv, "set-env", "", "set this environment variable for containers")
+	flag.StringVar(&cfg.QosFile, "qos-file", "", "qosfile name")
 	flag.Parse()
 
 	if cfg.LogFile != "" {
@@ -220,6 +250,14 @@ func main() {
 			log.Fatalf("failed to open log file %q: %v", cfg.LogFile, err)
 		}
 		log.SetOutput(f)
+	}
+
+	if cfg.QosFile != "" {
+		qos, err := utils.SetNetIOClassConfig(cfg.QosFile)
+		if err != nil {
+			log.Fatalf("failed to open qos file %q : %v", cfg.QosFile, err)
+		}
+		log.Infof("---------%q", qos)
 	}
 
 	if pluginName != "" {

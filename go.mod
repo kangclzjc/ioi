@@ -10,6 +10,7 @@ require (
 
 require (
 	github.com/containerd/ttrpc v1.1.1-0.20220420014843-944ef4a40df3 // indirect
+	github.com/go-logr/logr v1.2.3 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/opencontainers/runtime-spec v1.0.3-0.20220825212826-86290f6a00fb // indirect
@@ -21,6 +22,7 @@ require (
 	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/cri-api v0.25.3 // indirect
+	k8s.io/klog/v2 v2.80.1 // indirect
 )
 
 replace github.com/containerd/nri => /root/go/src/kangclzjc/nri
