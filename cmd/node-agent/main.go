@@ -18,15 +18,18 @@ package main
 
 import (
 	"context"
+	"crypto/sha512"
 	"flag"
 	"fmt"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	utils "intel.com/ioi/pkg"
 	"intel.com/ioi/pkg/agent"
+	"net"
 	"os"
 	"sigs.k8s.io/yaml"
 	"strings"
+	"syscall"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -51,6 +54,9 @@ type plugin struct {
 }
 
 const latencyInMillis = 25
+const maxIfbDeviceLength = 15
+const ifbDevicePrefix = "bwp"
+const MaxHashLen = sha512.Size * 2
 
 var (
 	cfg config
@@ -101,6 +107,99 @@ func limit(rate uint64, latency float64, buffer uint32) uint32 {
 
 func latencyInUsec(latencyInMillis float64) float64 {
 	return float64(netlink.TIME_UNITS_PER_SEC) * (latencyInMillis / 1000.0)
+}
+
+func getMTU(deviceName string) (int, error) {
+	link, err := netlink.LinkByName(deviceName)
+	if err != nil {
+		return -1, err
+	}
+
+	return link.Attrs().MTU, nil
+}
+
+func MustFormatHashWithPrefix(length int, prefix string, toHash string) string {
+	if len(prefix) >= length || length > MaxHashLen {
+		panic("invalid length")
+	}
+
+	output := sha512.Sum512([]byte(toHash))
+	return fmt.Sprintf("%s%x", prefix, output)[:length]
+}
+
+func getIfbDeviceName(networkName string, containerId string) string {
+	return MustFormatHashWithPrefix(maxIfbDeviceLength, ifbDevicePrefix, networkName+containerId)
+}
+
+func CreateIfb(ifbDeviceName string, mtu int) error {
+	err := netlink.LinkAdd(&netlink.Ifb{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  ifbDeviceName,
+			Flags: net.FlagUp,
+			MTU:   mtu,
+		},
+	})
+
+	if err != nil {
+		return fmt.Errorf("adding link: %s", err)
+	}
+
+	return nil
+}
+
+func CreateEgressQdisc(rateInBits, burstInBits uint64, hostDeviceName string, ifbDeviceName string) error {
+	ifbDevice, err := netlink.LinkByName(ifbDeviceName)
+	if err != nil {
+		return fmt.Errorf("get ifb device: %s", err)
+	}
+	hostDevice, err := netlink.LinkByName(hostDeviceName)
+	if err != nil {
+		return fmt.Errorf("get host device: %s", err)
+	}
+
+	// add qdisc ingress on host device
+	ingress := &netlink.Ingress{
+		QdiscAttrs: netlink.QdiscAttrs{
+			LinkIndex: hostDevice.Attrs().Index,
+			Handle:    netlink.MakeHandle(0xffff, 0), // ffff:
+			Parent:    netlink.HANDLE_INGRESS,
+		},
+	}
+
+	err = netlink.QdiscAdd(ingress)
+	if err != nil {
+		return fmt.Errorf("create ingress qdisc: %s", err)
+	}
+
+	// add filter on host device to mirror traffic to ifb device
+	filter := &netlink.U32{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: hostDevice.Attrs().Index,
+			Parent:    ingress.QdiscAttrs.Handle,
+			Priority:  1,
+			Protocol:  syscall.ETH_P_ALL,
+		},
+		ClassId:    netlink.MakeHandle(1, 1),
+		RedirIndex: ifbDevice.Attrs().Index,
+		Actions: []netlink.Action{
+			&netlink.MirredAction{
+				ActionAttrs:  netlink.ActionAttrs{},
+				MirredAction: netlink.TCA_EGRESS_REDIR,
+				Ifindex:      ifbDevice.Attrs().Index,
+			},
+		},
+	}
+	err = netlink.FilterAdd(filter)
+	if err != nil {
+		return fmt.Errorf("add filter: %s", err)
+	}
+
+	// throttle traffic on ifb device
+	err = createTBF(rateInBits, burstInBits, ifbDevice.Attrs().Index)
+	if err != nil {
+		return fmt.Errorf("create ifb qdisc: %s", err)
+	}
+	return nil
 }
 
 func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
@@ -166,6 +265,23 @@ func setLimit(netNamespace string) {
 		fmt.Errorf("get host device: %s", err)
 	}
 	err = createTBF(1000000000, 100000000, hostDevice.Attrs().Index)
+	if err != nil {
+		log.Errorf("-------------err-----------", err)
+	}
+
+	mtu, err := getMTU(link.Attrs().Name)
+	if err != nil {
+		log.Errorf("-------------err-----------", err)
+	}
+
+	ifbDeviceName := getIfbDeviceName("flannel", "container")
+	log.Infof("================ifbname %s", ifbDeviceName)
+	err = CreateIfb(ifbDeviceName, mtu)
+	if err != nil {
+		log.Errorf("-------------err-----------", err)
+	}
+
+	err = CreateEgressQdisc(1000000000, 1000000000, link.Attrs().Name, ifbDeviceName)
 	if err != nil {
 		log.Errorf("-------------err-----------", err)
 	}
