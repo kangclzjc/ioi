@@ -21,13 +21,17 @@ import (
 	"flag"
 	"fmt"
 	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink"
 	utils "intel.com/ioi/pkg"
+	"intel.com/ioi/pkg/agent"
 	"os"
 	"sigs.k8s.io/yaml"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+	"github.com/containernetworking/plugins/pkg/ip"
+	"github.com/containernetworking/plugins/pkg/ns"
 )
 
 type config struct {
@@ -43,7 +47,10 @@ type config struct {
 type plugin struct {
 	stub stub.Stub
 	mask stub.EventMask
+	qos  *agent.QoSClasses
 }
+
+const latencyInMillis = 25
 
 var (
 	cfg config
@@ -80,6 +87,90 @@ func (p *plugin) Configure(config, runtime, version string) (stub.EventMask, err
 	return p.mask, nil
 }
 
+func time2Tick(time uint32) uint32 {
+	return uint32(float64(time) * float64(netlink.TickInUsec()))
+}
+
+func buffer(rate uint64, burst uint32) uint32 {
+	return time2Tick(uint32(float64(burst) * float64(netlink.TIME_UNITS_PER_SEC) / float64(rate)))
+}
+
+func limit(rate uint64, latency float64, buffer uint32) uint32 {
+	return uint32(float64(rate)*latency/float64(netlink.TIME_UNITS_PER_SEC)) + buffer
+}
+
+func latencyInUsec(latencyInMillis float64) float64 {
+	return float64(netlink.TIME_UNITS_PER_SEC) * (latencyInMillis / 1000.0)
+}
+
+func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
+	// Equivalent to
+	// tc qdisc add dev link root tbf
+	//		rate netConf.BandwidthLimits.Rate
+	//		burst netConf.BandwidthLimits.Burst
+	if rateInBits <= 0 {
+		return fmt.Errorf("invalid rate: %d", rateInBits)
+	}
+	if burstInBits <= 0 {
+		return fmt.Errorf("invalid burst: %d", burstInBits)
+	}
+	rateInBytes := rateInBits / 8
+	burstInBytes := burstInBits / 8
+	bufferInBytes := buffer(uint64(rateInBytes), uint32(burstInBytes))
+	latency := latencyInUsec(latencyInMillis)
+	limitInBytes := limit(uint64(rateInBytes), latency, uint32(burstInBytes))
+
+	qdisc := &netlink.Tbf{
+		QdiscAttrs: netlink.QdiscAttrs{
+			LinkIndex: linkIndex,
+			Handle:    netlink.MakeHandle(1, 0),
+			Parent:    netlink.HANDLE_ROOT,
+		},
+		Limit:  uint32(limitInBytes),
+		Rate:   uint64(rateInBytes),
+		Buffer: uint32(bufferInBytes),
+	}
+	err := netlink.QdiscAdd(qdisc)
+	if err != nil {
+		return fmt.Errorf("create qdisc: %s", err)
+	}
+	return nil
+}
+
+func setLimit(netNamespace string) {
+	netns, err := ns.GetNS(netNamespace)
+	if err != nil {
+		log.Errorf("Couldn't open this network namespacce %s", netNamespace)
+	}
+	defer netns.Close()
+
+	var i int
+	_ = netns.Do(func(_ ns.NetNS) error {
+		_, i, err = ip.GetVethPeerIfindex("eth0")
+		return nil
+	})
+
+	if i <= 0 {
+		log.Errorf("Couldn't find veth peer")
+	}
+
+	// find host interface by index
+	link, err := netlink.LinkByIndex(i)
+	if err != nil {
+		log.Errorf("Couldn't find host NIC of index %d", i)
+	}
+
+	log.Infof("------------link-----------%d %s %q", i, link.Attrs().Name, link)
+	hostDevice, err := netlink.LinkByName(link.Attrs().Name)
+	if err != nil {
+		fmt.Errorf("get host device: %s", err)
+	}
+	err = createTBF(1000000000, 100000000, hostDevice.Attrs().Index)
+	if err != nil {
+		log.Errorf("-------------err-----------", err)
+	}
+}
+
 func (p *plugin) Synchronize(pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
 	//dump("Synchronize", "pods", pods, "containers", containers)
 	return nil, nil
@@ -91,6 +182,7 @@ func (p *plugin) Shutdown() {
 
 func (p *plugin) RunPodSandbox(pod *api.PodSandbox) error {
 	log.Infof("---------%q------\n", pod.Linux.Netns)
+	setLimit(pod.Linux.Netns)
 	for k, v := range pod.GetAnnotations() {
 		log.Infof("----%s: -----%s", k, v)
 
@@ -252,14 +344,6 @@ func main() {
 		log.SetOutput(f)
 	}
 
-	if cfg.QosFile != "" {
-		qos, err := utils.SetNetIOClassConfig(cfg.QosFile)
-		if err != nil {
-			log.Fatalf("failed to open qos file %q : %v", cfg.QosFile, err)
-		}
-		log.Infof("---------%q", qos)
-	}
-
 	if pluginName != "" {
 		opts = append(opts, stub.WithPluginName(pluginName))
 	}
@@ -268,6 +352,14 @@ func main() {
 	}
 
 	p := &plugin{}
+	if cfg.QosFile != "" {
+		qos, err := utils.SetNetIOClassConfig(cfg.QosFile)
+		if err != nil {
+			log.Fatalf("failed to open qos file %q : %v", cfg.QosFile, err)
+		}
+		p.qos = qos
+		log.Infof("---------%q", qos)
+	}
 	if p.mask, err = api.ParseEventMask(events); err != nil {
 		log.Fatalf("failed to parse events: %v", err)
 	}
