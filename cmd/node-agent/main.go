@@ -18,23 +18,15 @@ package main
 
 import (
 	"context"
-	"crypto/sha512"
 	"flag"
 	"fmt"
+	"github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/stub"
 	"github.com/sirupsen/logrus"
-	"github.com/vishvananda/netlink"
-	utils "intel.com/ioi/pkg"
 	"intel.com/ioi/pkg/agent"
-	"net"
 	"os"
 	"sigs.k8s.io/yaml"
 	"strings"
-	"syscall"
-
-	"github.com/containerd/nri/pkg/api"
-	"github.com/containerd/nri/pkg/stub"
-	"github.com/containernetworking/plugins/pkg/ip"
-	"github.com/containernetworking/plugins/pkg/ns"
 )
 
 type config struct {
@@ -53,10 +45,7 @@ type plugin struct {
 	qos  *agent.QoSClasses
 }
 
-const latencyInMillis = 25
-const maxIfbDeviceLength = 15
-const ifbDevicePrefix = "bwp"
-const MaxHashLen = sha512.Size * 2
+const QosClassPrefix = "netio.resources.kubernetes.io"
 
 var (
 	cfg config
@@ -93,202 +82,11 @@ func (p *plugin) Configure(config, runtime, version string) (stub.EventMask, err
 	return p.mask, nil
 }
 
-func time2Tick(time uint32) uint32 {
-	return uint32(float64(time) * float64(netlink.TickInUsec()))
-}
-
-func buffer(rate uint64, burst uint32) uint32 {
-	return time2Tick(uint32(float64(burst) * float64(netlink.TIME_UNITS_PER_SEC) / float64(rate)))
-}
-
-func limit(rate uint64, latency float64, buffer uint32) uint32 {
-	return uint32(float64(rate)*latency/float64(netlink.TIME_UNITS_PER_SEC)) + buffer
-}
-
-func latencyInUsec(latencyInMillis float64) float64 {
-	return float64(netlink.TIME_UNITS_PER_SEC) * (latencyInMillis / 1000.0)
-}
-
-func getMTU(deviceName string) (int, error) {
-	link, err := netlink.LinkByName(deviceName)
-	if err != nil {
-		return -1, err
-	}
-
-	return link.Attrs().MTU, nil
-}
-
-func MustFormatHashWithPrefix(length int, prefix string, toHash string) string {
-	if len(prefix) >= length || length > MaxHashLen {
-		panic("invalid length")
-	}
-
-	output := sha512.Sum512([]byte(toHash))
-	return fmt.Sprintf("%s%x", prefix, output)[:length]
-}
-
-func getIfbDeviceName(networkName string, containerId string) string {
-	return MustFormatHashWithPrefix(maxIfbDeviceLength, ifbDevicePrefix, networkName+containerId)
-}
-
-func CreateIfb(ifbDeviceName string, mtu int) error {
-	err := netlink.LinkAdd(&netlink.Ifb{
-		LinkAttrs: netlink.LinkAttrs{
-			Name:  ifbDeviceName,
-			Flags: net.FlagUp,
-			MTU:   mtu,
-		},
-	})
-
-	if err != nil {
-		return fmt.Errorf("adding link: %s", err)
-	}
-
-	return nil
-}
-
-func CreateEgressQdisc(rateInBits, burstInBits uint64, hostDeviceName string, ifbDeviceName string) error {
-	ifbDevice, err := netlink.LinkByName(ifbDeviceName)
-	if err != nil {
-		return fmt.Errorf("get ifb device: %s", err)
-	}
-	hostDevice, err := netlink.LinkByName(hostDeviceName)
-	if err != nil {
-		return fmt.Errorf("get host device: %s", err)
-	}
-
-	// add qdisc ingress on host device
-	ingress := &netlink.Ingress{
-		QdiscAttrs: netlink.QdiscAttrs{
-			LinkIndex: hostDevice.Attrs().Index,
-			Handle:    netlink.MakeHandle(0xffff, 0), // ffff:
-			Parent:    netlink.HANDLE_INGRESS,
-		},
-	}
-
-	err = netlink.QdiscAdd(ingress)
-	if err != nil {
-		return fmt.Errorf("create ingress qdisc: %s", err)
-	}
-
-	// add filter on host device to mirror traffic to ifb device
-	filter := &netlink.U32{
-		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: hostDevice.Attrs().Index,
-			Parent:    ingress.QdiscAttrs.Handle,
-			Priority:  1,
-			Protocol:  syscall.ETH_P_ALL,
-		},
-		ClassId:    netlink.MakeHandle(1, 1),
-		RedirIndex: ifbDevice.Attrs().Index,
-		Actions: []netlink.Action{
-			&netlink.MirredAction{
-				ActionAttrs:  netlink.ActionAttrs{},
-				MirredAction: netlink.TCA_EGRESS_REDIR,
-				Ifindex:      ifbDevice.Attrs().Index,
-			},
-		},
-	}
-	err = netlink.FilterAdd(filter)
-	if err != nil {
-		return fmt.Errorf("add filter: %s", err)
-	}
-
-	// throttle traffic on ifb device
-	err = createTBF(rateInBits, burstInBits, ifbDevice.Attrs().Index)
-	if err != nil {
-		return fmt.Errorf("create ifb qdisc: %s", err)
-	}
-	return nil
-}
-
-func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
-	// Equivalent to
-	// tc qdisc add dev link root tbf
-	//		rate netConf.BandwidthLimits.Rate
-	//		burst netConf.BandwidthLimits.Burst
-	if rateInBits <= 0 {
-		return fmt.Errorf("invalid rate: %d", rateInBits)
-	}
-	if burstInBits <= 0 {
-		return fmt.Errorf("invalid burst: %d", burstInBits)
-	}
-	rateInBytes := rateInBits / 8
-	burstInBytes := burstInBits / 8
-	bufferInBytes := buffer(uint64(rateInBytes), uint32(burstInBytes))
-	latency := latencyInUsec(latencyInMillis)
-	limitInBytes := limit(uint64(rateInBytes), latency, uint32(burstInBytes))
-
-	qdisc := &netlink.Tbf{
-		QdiscAttrs: netlink.QdiscAttrs{
-			LinkIndex: linkIndex,
-			Handle:    netlink.MakeHandle(1, 0),
-			Parent:    netlink.HANDLE_ROOT,
-		},
-		Limit:  uint32(limitInBytes),
-		Rate:   uint64(rateInBytes),
-		Buffer: uint32(bufferInBytes),
-	}
-	err := netlink.QdiscAdd(qdisc)
-	if err != nil {
-		return fmt.Errorf("create qdisc: %s", err)
-	}
-	return nil
-}
-
-func setLimit(netNamespace string) {
-	netns, err := ns.GetNS(netNamespace)
-	if err != nil {
-		log.Errorf("Couldn't open this network namespacce %s", netNamespace)
-	}
-	defer netns.Close()
-
-	var i int
-	_ = netns.Do(func(_ ns.NetNS) error {
-		_, i, err = ip.GetVethPeerIfindex("eth0")
-		return nil
-	})
-
-	if i <= 0 {
-		log.Errorf("Couldn't find veth peer")
-	}
-
-	// find host interface by index
-	link, err := netlink.LinkByIndex(i)
-	if err != nil {
-		log.Errorf("Couldn't find host NIC of index %d", i)
-	}
-
-	log.Infof("------------link-----------%d %s %q", i, link.Attrs().Name, link)
-	hostDevice, err := netlink.LinkByName(link.Attrs().Name)
-	if err != nil {
-		fmt.Errorf("get host device: %s", err)
-	}
-	err = createTBF(1000000000, 100000000, hostDevice.Attrs().Index)
-	if err != nil {
-		log.Errorf("-------------err-----------", err)
-	}
-
-	mtu, err := getMTU(link.Attrs().Name)
-	if err != nil {
-		log.Errorf("-------------err-----------", err)
-	}
-
-	ifbDeviceName := getIfbDeviceName("flannel", "container")
-	log.Infof("================ifbname %s", ifbDeviceName)
-	err = CreateIfb(ifbDeviceName, mtu)
-	if err != nil {
-		log.Errorf("-------------err-----------", err)
-	}
-
-	err = CreateEgressQdisc(1000000000, 1000000000, link.Attrs().Name, ifbDeviceName)
-	if err != nil {
-		log.Errorf("-------------err-----------", err)
-	}
-}
-
 func (p *plugin) Synchronize(pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
-	//dump("Synchronize", "pods", pods, "containers", containers)
+	dump("Synchronize", "pods", pods, "containers", containers)
+	for _, pod := range pods {
+		log.Infof("---------%q------\n", pod.Linux)
+	}
 	return nil, nil
 }
 
@@ -298,10 +96,13 @@ func (p *plugin) Shutdown() {
 
 func (p *plugin) RunPodSandbox(pod *api.PodSandbox) error {
 	log.Infof("---------%q------\n", pod.Linux.Netns)
-	setLimit(pod.Linux.Netns)
 	for k, v := range pod.GetAnnotations() {
 		log.Infof("----%s: -----%s", k, v)
-
+		if strings.HasPrefix(k, QosClassPrefix) {
+			netNsPath := agent.GetNetNSPath(pod)
+			log.Infof("------netNsPath---%s------\n", netNsPath)
+			agent.SetLimit(pod.Id, netNsPath)
+		}
 		//if k == "kubectl.kubernetes.io/last-applied-configuration" {
 		//	var vv interface{}
 		//	json.Unmarshal([]byte(v), &vv)
@@ -325,19 +126,22 @@ func (p *plugin) RunPodSandbox(pod *api.PodSandbox) error {
 		//	}
 		//}
 	}
-	if value, ok := pod.Annotations["netio.resources.kubernetes.io/class"]; ok {
-		fmt.Printf(value)
-	} else {
-		fmt.Println("key1 不存在")
-	}
 	return nil
 }
 
 func (p *plugin) StopPodSandbox(pod *api.PodSandbox) error {
+	log.Infof("StopPodSandbox---------%q------\n", pod.Linux)
+	for k, v := range pod.GetAnnotations() {
+		log.Infof("----%s: -----%s", k, v)
+	}
 	return nil
 }
 
 func (p *plugin) RemovePodSandbox(pod *api.PodSandbox) error {
+	log.Infof("RemovePodSandbox---------%q------\n", pod)
+	for k, v := range pod.GetAnnotations() {
+		log.Infof("----%s: -----%s", k, v)
+	}
 	return nil
 }
 
@@ -386,6 +190,7 @@ func (p *plugin) StopContainer(pod *api.PodSandbox, container *api.Container) ([
 }
 
 func (p *plugin) RemoveContainer(pod *api.PodSandbox, container *api.Container) error {
+	log.Infof("RemoveContainer---------%q------\n", pod.Linux)
 	return nil
 }
 
@@ -469,7 +274,7 @@ func main() {
 
 	p := &plugin{}
 	if cfg.QosFile != "" {
-		qos, err := utils.SetNetIOClassConfig(cfg.QosFile)
+		qos, err := agent.SetNetIOClassConfig(cfg.QosFile)
 		if err != nil {
 			log.Fatalf("failed to open qos file %q : %v", cfg.QosFile, err)
 		}
