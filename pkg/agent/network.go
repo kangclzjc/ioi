@@ -3,7 +3,6 @@ package agent
 import (
 	"crypto/sha512"
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"net"
 	"syscall"
 
@@ -15,13 +14,15 @@ import (
 
 const latencyInMillis = 25
 const maxIfbDeviceLength = 15
-const ifbDevicePrefix = "bwp"
+const ifbDevicePrefix = "ioi"
 const MaxHashLen = sha512.Size * 2
 
 type RequestBandwidth struct {
 	DeviceName       string
-	IngressBandwidth resource.Quantity
-	EgressBandwidth  resource.Quantity
+	IngressBandwidth int64
+	IngressBurst     int64
+	EgressBandwidth  int64
+	EgressBurst      int64
 }
 
 func time2Tick(time uint32) uint32 {
@@ -58,8 +59,10 @@ func MustFormatHashWithPrefix(length int, prefix string, toHash string) string {
 	return fmt.Sprintf("%s%x", prefix, output)[:length]
 }
 
-func getIfbDeviceName(networkName string, containerId string) string {
-	return MustFormatHashWithPrefix(maxIfbDeviceLength, ifbDevicePrefix, networkName+containerId)
+func GenerateIfbName(podId string) string {
+	out := sha512.Sum512([]byte(podId))
+
+	return fmt.Sprintf("%s%x", ifbDevicePrefix, out)[:maxIfbDeviceLength]
 }
 
 func CreateIfb(ifbDeviceName string, mtu int) error {
@@ -167,8 +170,9 @@ func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
 	return nil
 }
 
-func SetLimit(podId, netNamespace string, request RequestBandwidth) {
+func SetLimit(podId, netNamespace string, request *RequestBandwidth) (ifb string) {
 	klog.Info("start set limit")
+	klog.Info("egress is ", request.EgressBandwidth, " ingress is", request.IngressBandwidth, " burst is ", request.EgressBurst)
 
 	nic := GetPrimaryNIC(netNamespace)
 	netns, err := ns.GetNS(netNamespace)
@@ -197,7 +201,7 @@ func SetLimit(podId, netNamespace string, request RequestBandwidth) {
 	if err != nil {
 		klog.Errorf("get host device: %s", err)
 	}
-	err = createTBF(1000000000, 100000000, hostDevice.Attrs().Index)
+	err = createTBF(uint64(request.IngressBandwidth), uint64(request.IngressBurst), hostDevice.Attrs().Index)
 	if err != nil {
 		klog.Errorf("-------------err-----------", err)
 	}
@@ -207,15 +211,25 @@ func SetLimit(podId, netNamespace string, request RequestBandwidth) {
 		klog.Errorf("-------------err-----------", err)
 	}
 
-	ifbDeviceName := getIfbDeviceName(podId, podId)
-	klog.Infof("================ifbname %s", ifbDeviceName)
-	err = CreateIfb(ifbDeviceName, mtu)
+	ifb = GenerateIfbName(podId)
+
+	klog.Infof("================ifbname %s", ifb)
+	err = CreateIfb(ifb, mtu)
 	if err != nil {
 		klog.Errorf("-------------err-----------", err)
 	}
 
-	err = CreateEgressQdisc(1000000000, 1000000000, link.Attrs().Name, ifbDeviceName)
+	err = CreateEgressQdisc(uint64(request.EgressBandwidth), uint64(request.EgressBurst), link.Attrs().Name, ifb)
 	if err != nil {
 		klog.Errorf("-------------err-----------", err)
 	}
+	return ifb
+}
+
+func DelIfb(ifb string) error {
+	_, err := ip.DelLinkByNameAddr(ifb)
+	if err != nil && err == ip.ErrLinkNotFound {
+		return nil
+	}
+	return err
 }

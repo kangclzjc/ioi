@@ -40,6 +40,7 @@ func GetPrimaryNIC(netNs string) string {
 	return "eth0"
 }
 
-func ParseRequestBandwidth(bandwidth string) resource.Quantity {
-	return resource.MustParse(bandwidth)
+func ParseRequestBandwidth(bandwidth string) *resource.Quantity {
+	v := resource.MustParse(bandwidth)
+	return &v
 }

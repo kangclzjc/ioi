@@ -20,13 +20,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
+	"os"
+	"strings"
+
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/sirupsen/logrus"
 	"intel.com/ioi/pkg/agent"
-	"os"
 	"sigs.k8s.io/yaml"
-	"strings"
 )
 
 type config struct {
@@ -48,13 +50,14 @@ type plugin struct {
 const QosClassPrefix = "netio.resources.kubernetes.io"
 
 var (
-	cfg config
-	log *logrus.Logger
-	_   = stub.ConfigureInterface(&plugin{})
+	cfg  config
+	log  *logrus.Logger
+	_    = stub.ConfigureInterface(&plugin{})
+	ifbs = make(map[string]string)
 )
 
 func (p *plugin) Configure(config, runtime, version string) (stub.EventMask, error) {
-	log.Infof("got configuration data: %q from runtime %s %s", config, runtime, version)
+	log.Infof("got configuration dataq from runtime %s %s", config, runtime, version)
 	if config == "" {
 		return p.mask, nil
 	}
@@ -84,6 +87,17 @@ func (p *plugin) Configure(config, runtime, version string) (stub.EventMask, err
 
 func (p *plugin) Synchronize(pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
 	//dump("Synchronize", "pods", pods, "containers", containers)
+	for _, pod := range pods {
+		for k, _ := range pod.GetAnnotations() {
+			if strings.HasPrefix(k, QosClassPrefix) {
+				if _, ok := ifbs[pod.Id]; !ok {
+					ifb := agent.GenerateIfbName(pod.Id)
+					log.Infof("--------ifb ---------- is %s", ifb)
+					ifbs[pod.Id] = ifb
+				}
+			}
+		}
+	}
 	return nil, nil
 }
 
@@ -91,14 +105,18 @@ func (p *plugin) Shutdown() {
 	dump("Shutdown")
 }
 
-func (p *plugin) parseAnnotation(annotation string) agent.RequestBandwidth {
+func (p *plugin) parseAnnotation(annotation string) *agent.RequestBandwidth {
 	log.Infof("---------%q------\n", p.qos.Classes["high-prio"])
-	request := agent.RequestBandwidth{}
+	request := &agent.RequestBandwidth{}
 	for _, v := range p.qos.Classes[annotation] {
 		log.Infof("----------%q", v.Devices[0].Ingress)
 		request.DeviceName = v.Devices[0].Name
-		request.IngressBandwidth = agent.ParseRequestBandwidth(v.Devices[0].Ingress)
-		request.EgressBandwidth = agent.ParseRequestBandwidth(v.Devices[0].Egress)
+		ingress, _ := agent.ParseRequestBandwidth(v.Devices[0].Ingress).AsInt64()
+		egress, _ := agent.ParseRequestBandwidth(v.Devices[0].Egress).AsInt64()
+		request.IngressBandwidth = ingress
+		request.IngressBurst = math.MaxUint32
+		request.EgressBandwidth = egress
+		request.EgressBurst = math.MaxUint32
 	}
 	return request
 }
@@ -114,8 +132,11 @@ func (p *plugin) RunPodSandbox(pod *api.PodSandbox) error {
 			request := p.parseAnnotation(v)
 			netNsPath := agent.GetNetNSPath(pod)
 
-			log.Infof("------netNsPath---%s------ %q\n", netNsPath, request)
-			agent.SetLimit(pod.Id, netNsPath, request)
+			log.Infof("------netNsPath---%s------ %q\n", netNsPath, *request)
+			ifb := agent.SetLimit(pod.Id, netNsPath, request)
+			if ifb != "" {
+				ifbs[pod.Id] = ifb
+			}
 		}
 		//if k == "kubectl.kubernetes.io/last-applied-configuration" {
 		//	var vv interface{}
@@ -155,6 +176,12 @@ func (p *plugin) RemovePodSandbox(pod *api.PodSandbox) error {
 	log.Infof("RemovePodSandbox---------%q------\n", pod)
 	for k, v := range pod.GetAnnotations() {
 		log.Infof("----%s: -----%s", k, v)
+	}
+
+	ifb := agent.GenerateIfbName(pod.Id)
+	err := agent.DelIfb(ifb)
+	if err != nil {
+		log.Errorf("Can't delete ifb %s, %w", ifb, err)
 	}
 	return nil
 }
