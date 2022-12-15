@@ -83,10 +83,7 @@ func (p *plugin) Configure(config, runtime, version string) (stub.EventMask, err
 }
 
 func (p *plugin) Synchronize(pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
-	dump("Synchronize", "pods", pods, "containers", containers)
-	for _, pod := range pods {
-		log.Infof("---------%q------\n", pod.Linux)
-	}
+	//dump("Synchronize", "pods", pods, "containers", containers)
 	return nil, nil
 }
 
@@ -94,14 +91,31 @@ func (p *plugin) Shutdown() {
 	dump("Shutdown")
 }
 
+func (p *plugin) parseAnnotation(annotation string) agent.RequestBandwidth {
+	log.Infof("---------%q------\n", p.qos.Classes["high-prio"])
+	request := agent.RequestBandwidth{}
+	for _, v := range p.qos.Classes[annotation] {
+		log.Infof("----------%q", v.Devices[0].Ingress)
+		request.DeviceName = v.Devices[0].Name
+		request.IngressBandwidth = agent.ParseRequestBandwidth(v.Devices[0].Ingress)
+		request.EgressBandwidth = agent.ParseRequestBandwidth(v.Devices[0].Egress)
+	}
+	return request
+}
+
 func (p *plugin) RunPodSandbox(pod *api.PodSandbox) error {
 	log.Infof("---------%q------\n", pod.Linux.Netns)
+
+	//request := agent.RequestBandwidth{}
 	for k, v := range pod.GetAnnotations() {
 		log.Infof("----%s: -----%s", k, v)
 		if strings.HasPrefix(k, QosClassPrefix) {
+
+			request := p.parseAnnotation(v)
 			netNsPath := agent.GetNetNSPath(pod)
-			log.Infof("------netNsPath---%s------\n", netNsPath)
-			agent.SetLimit(pod.Id, netNsPath)
+
+			log.Infof("------netNsPath---%s------ %q\n", netNsPath, request)
+			agent.SetLimit(pod.Id, netNsPath, request)
 		}
 		//if k == "kubectl.kubernetes.io/last-applied-configuration" {
 		//	var vv interface{}

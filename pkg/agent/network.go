@@ -3,6 +3,7 @@ package agent
 import (
 	"crypto/sha512"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"net"
 	"syscall"
 
@@ -16,6 +17,12 @@ const latencyInMillis = 25
 const maxIfbDeviceLength = 15
 const ifbDevicePrefix = "bwp"
 const MaxHashLen = sha512.Size * 2
+
+type RequestBandwidth struct {
+	DeviceName       string
+	IngressBandwidth resource.Quantity
+	EgressBandwidth  resource.Quantity
+}
 
 func time2Tick(time uint32) uint32 {
 	return uint32(float64(time) * float64(netlink.TickInUsec()))
@@ -160,7 +167,7 @@ func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
 	return nil
 }
 
-func SetLimit(podId, netNamespace string) {
+func SetLimit(podId, netNamespace string, request RequestBandwidth) {
 	klog.Info("start set limit")
 
 	nic := GetPrimaryNIC(netNamespace)

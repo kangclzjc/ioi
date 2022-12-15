@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"github.com/containerd/nri/pkg/api"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"os"
 	"sigs.k8s.io/yaml"
 )
@@ -37,4 +38,8 @@ func GetNetNSPath(pod *api.PodSandbox) string {
 
 func GetPrimaryNIC(netNs string) string {
 	return "eth0"
+}
+
+func ParseRequestBandwidth(bandwidth string) resource.Quantity {
+	return resource.MustParse(bandwidth)
 }
